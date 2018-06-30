@@ -3,6 +3,7 @@ package app;
 import java.io.BufferedInputStream;
 import java.io.BufferedReader;
 import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.StringWriter;
@@ -13,20 +14,21 @@ import java.security.NoSuchProviderException;
 import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.security.Security;
+import java.security.UnrecoverableKeyException;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
+import java.security.cert.X509Certificate;
 
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
 import javax.crypto.NoSuchPaddingException;
 import javax.crypto.SecretKey;
+import javax.crypto.spec.IvParameterSpec;
 import javax.mail.internet.MimeMessage;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
-import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.transform.OutputKeys;
 import javax.xml.transform.Transformer;
-import javax.xml.transform.TransformerConfigurationException;
 import javax.xml.transform.TransformerException;
 import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
@@ -35,18 +37,26 @@ import javax.xml.transform.stream.StreamResult;
 import org.apache.xml.security.encryption.EncryptedData;
 import org.apache.xml.security.encryption.EncryptedKey;
 import org.apache.xml.security.encryption.XMLCipher;
+import org.apache.xml.security.exceptions.XMLSecurityException;
 import org.apache.xml.security.keys.KeyInfo;
+import org.apache.xml.security.signature.XMLSignature;
+import org.apache.xml.security.signature.XMLSignatureException;
+import org.apache.xml.security.transforms.TransformationException;
+import org.apache.xml.security.transforms.Transforms;
+import org.apache.xml.security.utils.Constants;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.w3c.dom.DOMException;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.NodeList;
 
 import com.google.api.services.gmail.Gmail;
 
-import keystore.KeyStoreReader;
-import model.keystore.IssuerData;
 import support.MailHelper;
 import support.MailWritter;
+import util.Base64;
+import util.GzipUtil;
+import util.IVHelper;
 
 public class WriteMailClient extends MailClient {
 
@@ -81,9 +91,15 @@ public class WriteMailClient extends MailClient {
 
 			Document doc = docBuilder.newDocument();
 			Element rootElement = doc.createElement("mail");
+			
+			Element sub = doc.createElement("sub");
+			Element mailBody = doc.createElement("mailBody");
 
-			rootElement.setTextContent(body);
 			doc.appendChild(rootElement);
+			rootElement.appendChild(sub);
+			rootElement.appendChild(mailBody);
+			sub.setTextContent(subject);
+			mailBody.setTextContent(body);	
 
 			// dokument pre enkripcije
 			String xml = xmlAsString(doc);
@@ -126,11 +142,27 @@ public class WriteMailClient extends MailClient {
 			
 			xmlCipher.doFinal(doc, mail, true);//kriptuje se sadrzaj
 
-			// Slanje poruke
+			//potpisivanje dokumenta
+			WriteMailClient sign = new WriteMailClient();
+			sign.signingDocument(doc);
+			
 			String encryptedXml = xmlAsString(doc);
 			System.out.println("Mail posle enkripcije: " + encryptedXml);
+			
+			
+			String compressedSubject = Base64.encodeToString(GzipUtil.compress(subject));
+			Cipher aesCipherEnc = Cipher.getInstance("AES/CBC/PKCS5Padding");
+			
+			//inicijalizacija za sifrovanje 
+			IvParameterSpec ivParameterSpec2 = IVHelper.createIV();
+			aesCipherEnc.init(Cipher.ENCRYPT_MODE, secretKey, ivParameterSpec2);
+			
+			byte[] ciphersubject = aesCipherEnc.doFinal(compressedSubject.getBytes());
+			String ciphersubjectStr = Base64.encodeToString(ciphersubject);
+			System.out.println("Kriptovan subject: " + ciphersubjectStr);
 
-			MimeMessage mimeMessage = MailHelper.createMimeMessage(reciever, subject, encryptedXml);
+			// Slanje poruke
+			MimeMessage mimeMessage = MailHelper.createMimeMessage(reciever, ciphersubjectStr, encryptedXml);
 			MailWritter.sendMessage(service, "me", mimeMessage);
 
 		} catch (Exception e) {
@@ -161,12 +193,140 @@ public class WriteMailClient extends MailClient {
 		KeyStore keyStore = KeyStore.getInstance("JKS", "SUN");
 		
 		BufferedInputStream in = new BufferedInputStream(
-					new FileInputStream("./data/user_b.jks"));
+					new FileInputStream("./data/user_a.jks"));
 		keyStore.load(in, "123".toCharArray());
 		System.out.println("Cita se Sertifikat...");
 		System.out.println("Ucitani sertifikat:");
 		cert = keyStore.getCertificate("user_b");
 		PublicKey  publicKey = cert.getPublicKey();
 		return publicKey;
+	}
+	
+	private Document signDocument(Document doc, PrivateKey privateKey, X509Certificate cert) {
+		try {
+			Element rootEl = doc.getDocumentElement();
+			
+			//kreira se signature objekat
+			XMLSignature sig = new XMLSignature(doc, null, XMLSignature.ALGO_ID_SIGNATURE_RSA_SHA1);
+			//kreiraju se transformacije nad dokumentom
+			Transforms transforms = new Transforms(doc);
+			    
+			//iz potpisa uklanja Signature element
+			//Ovo je potrebno za enveloped tip po specifikaciji
+			transforms.addTransform(Transforms.TRANSFORM_ENVELOPED_SIGNATURE);
+			//normalizacija
+			transforms.addTransform(Transforms.TRANSFORM_C14N_WITH_COMMENTS);
+			    
+			//potpisuje se citav dokument (URI "")
+			sig.addDocument("", transforms, Constants.ALGO_ID_DIGEST_SHA1);
+			    
+			//U KeyInfo se postavalja Javni kljuc samostalno i citav sertifikat
+			sig.addKeyInfo(cert.getPublicKey());
+			sig.addKeyInfo((X509Certificate) cert);
+			System.out.println("sign: " + sig);
+			System.out.println("sig.keyinfo " + sig.getKeyInfo());
+			    
+			//poptis je child root elementa
+			rootEl.appendChild(sig.getElement());
+			System.out.println("sign pre kriptovanja: " + sig);    
+			//potpisivanje
+			sig.sign(privateKey);
+			System.out.println("sign kriptovani: " + sig);
+			
+			return doc;
+	    } catch (TransformationException e) {
+			e.printStackTrace();
+			return null;
+		} catch (XMLSignatureException e) {
+			e.printStackTrace();
+			return null;
+		} catch (DOMException e) {
+			e.printStackTrace();
+			return null;
+		} catch (XMLSecurityException e) {
+			e.printStackTrace();
+			return null;
+		}
+	}
+	
+	private static PrivateKey getPrivateKey(){
+		try {
+			KeyStore keyStore = KeyStore.getInstance("JKS", "SUN");
+			//ucitavanje keyStore
+			BufferedInputStream in = new BufferedInputStream(new FileInputStream("./data/user_a.jks"));
+			keyStore.load(in, "123".toCharArray());
+			
+			if(keyStore.isKeyEntry("user_a")) {
+				PrivateKey privateKey = (PrivateKey) keyStore.getKey("user_a", "123".toCharArray());
+				return privateKey;
+			}
+			else
+				return null;
+		} catch (KeyStoreException e) {
+			e.printStackTrace();
+			return null;
+		} catch (NoSuchProviderException e) {
+			e.printStackTrace();
+			return null;
+		} catch (FileNotFoundException e) {
+			e.printStackTrace();
+			return null;
+		} catch (NoSuchAlgorithmException e) {
+			e.printStackTrace();
+			return null;
+		} catch (CertificateException e) {
+			e.printStackTrace();
+			return null;
+		} catch (IOException e) {
+			e.printStackTrace();
+			return null;
+		} catch (UnrecoverableKeyException e) {
+			e.printStackTrace();
+			return null;
+		} 
+	}
+	
+	private X509Certificate getCertificate() {
+		try {
+			//kreiramo instancu KeyStore
+			KeyStore ks = KeyStore.getInstance("JKS", "SUN");
+			//ucitavamo podatke
+			BufferedInputStream in = new BufferedInputStream(new FileInputStream("./data/user_b.jks"));
+			ks.load(in, "123".toCharArray());
+			
+			if(ks.isKeyEntry("user_b")) {
+				X509Certificate cert = (X509Certificate) ks.getCertificate("user_a");
+				return cert;
+				
+			}
+			else
+				return null;
+			
+		} catch (KeyStoreException e) {
+			e.printStackTrace();
+			return null;
+		} catch (NoSuchProviderException e) {
+			e.printStackTrace();
+			return null;
+		} catch (FileNotFoundException e) {
+			e.printStackTrace();
+			return null;
+		} catch (NoSuchAlgorithmException e) {
+			e.printStackTrace();
+			return null;
+		} catch (CertificateException e) {
+			e.printStackTrace();
+			return null;
+		} catch (IOException e) {
+			e.printStackTrace();
+			return null;
+		} 
+	}
+	
+	private void signingDocument(Document doc){
+		PrivateKey privateKey = getPrivateKey();
+		X509Certificate cert = getCertificate();
+		System.out.println("Signing....");
+		doc = signDocument(doc, privateKey, cert);
 	}
 }

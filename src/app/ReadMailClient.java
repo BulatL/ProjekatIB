@@ -3,27 +3,23 @@ package app;
 import java.io.BufferedInputStream;
 import java.io.BufferedReader;
 import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.StringReader;
 import java.io.StringWriter;
-import java.security.InvalidAlgorithmParameterException;
-import java.security.InvalidKeyException;
 import java.security.KeyStore;
 import java.security.KeyStoreException;
 import java.security.NoSuchAlgorithmException;
 import java.security.NoSuchProviderException;
 import java.security.PrivateKey;
-import java.security.PublicKey;
 import java.security.Security;
 import java.security.UnrecoverableKeyException;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
-import java.security.spec.InvalidKeySpecException;
-import java.text.ParseException;
+import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.List;
-
 
 import javax.mail.MessagingException;
 import javax.mail.internet.MimeMessage;
@@ -37,6 +33,12 @@ import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
 
 import org.apache.xml.security.encryption.XMLCipher;
+import org.apache.xml.security.exceptions.XMLSecurityException;
+import org.apache.xml.security.keys.KeyInfo;
+import org.apache.xml.security.keys.keyresolver.implementations.RSAKeyValueResolver;
+import org.apache.xml.security.keys.keyresolver.implementations.X509CertificateResolver;
+import org.apache.xml.security.signature.XMLSignature;
+import org.apache.xml.security.signature.XMLSignatureException;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
@@ -46,11 +48,8 @@ import org.xml.sax.InputSource;
 import com.google.api.services.gmail.Gmail;
 import com.google.api.services.gmail.model.Message;
 
-import keystore.KeyStoreReader;
-import model.keystore.IssuerData;
 import support.MailHelper;
 import support.MailReader;
-import util.Base64;
 
 public class ReadMailClient extends MailClient {
 
@@ -132,7 +131,13 @@ public class ReadMailClient extends MailClient {
 		//pri cemu se prvo dekriptuje tajni kljuc, pa onda njime podaci
 		xmlCipher.doFinal(doc, encData); 
 		
-		System.out.println("Body text: " + doc.getElementsByTagName("mail").item(0).getTextContent());
+		//provera potpisa
+		ReadMailClient verify = new ReadMailClient();
+		verify.verify(doc);
+		
+		System.out.println("Subject text: " + doc.getElementsByTagName("sub").item(0).getTextContent());
+		System.out.println("Body text: " + doc.getElementsByTagName("mailBody").item(0).getTextContent());
+		System.out.println("signature text: " + doc);
 		
 	}
 	
@@ -162,17 +167,133 @@ public class ReadMailClient extends MailClient {
 	}
 	
 	// TODO 1 - iz sertifikata korisnika B izvuci njegov tajni kljc 
-	private static PrivateKey getPrivateKey() throws KeyStoreException, NoSuchProviderException, NoSuchAlgorithmException, CertificateException, IOException, UnrecoverableKeyException {
-		KeyStore keyStore = KeyStore.getInstance("JKS", "SUN");
-		//ucitavanje keyStore
-		BufferedInputStream in = new BufferedInputStream(new FileInputStream("./data/user_b.jks"));
-		keyStore.load(in, "123".toCharArray());
-		
-		if(keyStore.isKeyEntry("user_b")) {
-			PrivateKey privateKey = (PrivateKey) keyStore.getKey("user_b", "123".toCharArray());
-			return privateKey;
-		}
-		else
+	private static PrivateKey getPrivateKey(){
+		try {
+			KeyStore keyStore = KeyStore.getInstance("JKS", "SUN");
+			//ucitavanje keyStore
+			BufferedInputStream in = new BufferedInputStream(new FileInputStream("./data/user_b.jks"));
+			keyStore.load(in, "123".toCharArray());
+			
+			if(keyStore.isKeyEntry("user_b")) {
+				PrivateKey privateKey = (PrivateKey) keyStore.getKey("user_b", "123".toCharArray());
+				return privateKey;
+			}
+			else
+				return null;
+		} catch (KeyStoreException e) {
+			e.printStackTrace();
 			return null;
+		} catch (NoSuchProviderException e) {
+			e.printStackTrace();
+			return null;
+		} catch (FileNotFoundException e) {
+			e.printStackTrace();
+			return null;
+		} catch (NoSuchAlgorithmException e) {
+			e.printStackTrace();
+			return null;
+		} catch (CertificateException e) {
+			e.printStackTrace();
+			return null;
+		} catch (IOException e) {
+			e.printStackTrace();
+			return null;
+		} catch (UnrecoverableKeyException e) {
+			e.printStackTrace();
+			return null;
+		} 
+	}
+	
+	public void verify(Document doc) {
+		boolean res = verifySignature(doc);
+		System.out.println("Verification = " + res);
+	}
+	
+	private static boolean verifySignature(Document doc) {
+		try {
+			//Pronalazi se prvi Signature element
+			NodeList signatures = doc.getElementsByTagNameNS("http://www.w3.org/2000/09/xmldsig#", "Signature");
+			Element signatureEl = (Element) signatures.item(0);
+			
+			//kreira se signature objekat od elementa
+			XMLSignature signature = new XMLSignature(signatureEl, null);
+			
+			//preuzima se key info
+			KeyInfo keyInfo = signature.getKeyInfo();
+			
+			//ako postoji
+			if(keyInfo != null) {
+				//registruju se resolver-i za javni kljuc i sertifikat
+				keyInfo.registerInternalKeyResolver(new RSAKeyValueResolver());
+			    keyInfo.registerInternalKeyResolver(new X509CertificateResolver());
+			    
+			    //ako sadrzi sertifikat
+			    if(keyInfo.containsX509Data() && keyInfo.itemX509Data(0).containsCertificate()) { 
+			    	X509Certificate  cert =(X509Certificate) readCertificate();
+			        System.out.println("cert za proveru \n" + cert.getSignature());
+			        System.out.println("keyinfo za proveru \n" + keyInfo.getX509Certificate().getSignature());
+			        System.out.println("sertifikat provera: " + (cert.getSignature()==keyInfo.getX509Certificate().getSignature()));
+			        System.out.println("cert provera: " + (cert==keyInfo.getX509Certificate()));
+			        
+			        //ako postoji sertifikat, provera potpisa
+			        if(cert != null) 
+			        	//return signature.checkSignatureValue((X509Certificate) cert);
+			        	if(cert.getSignature()==keyInfo.getX509Certificate().getSignature())
+			        		return true;
+			        	else 
+			        		return false;
+			        else
+			        	return false;
+			    }
+			    else
+			    	return false;
+			}
+			else
+				return false;
+		
+		} catch (XMLSignatureException e) {
+			e.printStackTrace();
+			return false;
+		} catch (XMLSecurityException e) {
+			e.printStackTrace();
+			return false;
+		}
+	}
+	private static X509Certificate readCertificate() {
+		try {
+			//kreiramo instancu KeyStore
+			KeyStore ks = KeyStore.getInstance("JKS", "SUN");
+			
+			//ucitavamo podatke
+			BufferedInputStream in = new BufferedInputStream(new FileInputStream("./data/user_b.jks"));
+			ks.load(in, "123".toCharArray());
+			
+			if(ks.isKeyEntry("user_b")) {
+				X509Certificate  cert =(X509Certificate ) ks.getCertificate("user_a");
+				return cert;
+				
+			}
+			else
+				return null;
+			
+		} catch (KeyStoreException e) {
+			e.printStackTrace();
+			return null;
+		} catch (NoSuchProviderException e) {
+			e.printStackTrace();
+			return null;
+		} catch (FileNotFoundException e) {
+			e.printStackTrace();
+			return null;
+		} catch (NoSuchAlgorithmException e) {
+			e.printStackTrace();
+			return null;
+		} catch (CertificateException e) {
+			e.printStackTrace();
+			return null;
+		} catch (IOException e) {
+			e.printStackTrace();
+			return null;
+		} 
 	}
 }
