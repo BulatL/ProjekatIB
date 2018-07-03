@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html style="
+	height: 100%;
+	display: table;
+    margin: auto">
+	<head>
+		<title>Main page</title>
+		<script src="js/jquery-3.2.1.js"></script>
+	    <script src="js/mainPage.js" type="text/javascript"></script>
+	</head>
+	<body style="   
+			height: 100%;
+			margin-top:25px;
+		    padding: 0;
+		    background-position: top;
+		    font-family: sans-serif;
+		    display: table-cell;
+	    	vertical-align: middle">
+		<div class="container">
+			<div class="row">
+				<input type="text" id="searchInput" placeholder="email">
+				<input type="button" name="search_btn" id="searchButton" value="search" onclick="getUsersByEmail()"/>
+		    </div>
+			<div class="row" style="    
+				margin-bottom: 40px;
+			    margin-top: 10px;">
+			    <table id="users_Table" border=2>
+			    	<caption>All users</caption>
+			    	<tr>
+			    		<th>email</th>
+			    		<th>certificate</th>
+			    		<th>active</th>
+			    	</tr>
+			    </table>
+		    </div>
+		    <div class="row">
+				<input type="text" id="searchInactiveInput" placeholder="email">
+				<input type="button" name="search_btn" id="searchInactiveButton" value="search" onclick="getInactiveUsersByEmail()"/>
+		    </div>
+			<div class="row" style="    
+				margin-bottom: 40px;
+			    margin-top: 10px;">
+			    <table id="usersInactive_Table" border=2>
+			    	<caption>Inactive users</caption>
+			    	<tr>
+			    		<th>email</th>
+			    		<th>certificate</th>
+			    		<th>active</th>
+			    	</tr>
+			    </table>
+		    </div>
+		    <div class="row">
+		    	<input type="button" name="logOutBtn" id="logOutBtn" value="log out" onclick="logout()" style="
+		        margin-bottom: 15px;
+		        width: 60px;
+		        height: 22px;"/>
+		    </div>
+		</div>
+	</body>
+</html>
